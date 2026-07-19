@@ -68,3 +68,20 @@ Not a marketing surface, not a metrics dashboard, not proof that the business
 is *good* — only proof that a governed machine has been running its gates,
 under a stable governing record, with human consent receipts accumulating,
 every day since attestation #1. That is the entire claim, and you can check it.
+
+## The witness
+
+`witness.jsonl` is a SECOND chain, signed by a separate Ed25519 key
+(`witness_pub.json`) held by an independent scheduled observer. Each line is
+one re-derivation of the operating contract's two stored surfaces from raw
+bytes — never a copy of any stored verdict. Verify it the same way:
+
+```
+python3 verify_witness.py
+```
+
+Two keys, two chains, one repo: forging the contract now requires rewriting
+both public histories consistently, which any clone detects. The witness
+chain obeys the same honesty rules as the attestation chain — append-only,
+gaps visible, failures recorded as what they are (`DIVERGED` is published as
+`DIVERGED`).

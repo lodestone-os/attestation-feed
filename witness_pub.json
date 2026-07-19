@@ -1,0 +1,5 @@
+{
+ "witness_pub_ed25519": "20d1dcd929f0e18d08b3035a3623d0e43d78d93ffc0d0ee04b9297f84c826e7c",
+ "created": "2026-07-17T19:42:43+00:00",
+ "note": "public verification key for witness_log.jsonl \u2014 distinct from the feed key"
+}
