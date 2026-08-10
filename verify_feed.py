@@ -89,22 +89,53 @@ _Bx = _xrecover(_By)
 _B = (_Bx, _By)
 
 
+# Group arithmetic runs in extended homogeneous coordinates (RFC 8032 §5.1.4:
+# (x, y) ↔ (X, Y, Z, T) with x = X/Z, y = Y/Z, T = XY/Z) so the add/double loop
+# is inversion-free — a field inversion is a full 255-bit modexp, and paying two
+# of them per point addition made every signature check cost ~130ms (decl:1682:3).
+# _inv is spent only at the decode/encode boundaries.
+_2d = (2 * _d) % _q
+
+
+def _ext(P):
+    x, y = P
+    return (x, y, 1, (x * y) % _q)
+
+
+def _affine(P):
+    X, Y, Z, _T = P
+    zi = _inv(Z)
+    return ((X * zi) % _q, (Y * zi) % _q)
+
+
+def _ext_add(P, Q):
+    # add-2008-hwcd-3 for a = -1 twisted Edwards; unified (doubles too).
+    X1, Y1, Z1, T1 = P
+    X2, Y2, Z2, T2 = Q
+    A = ((Y1 - X1) * (Y2 - X2)) % _q
+    B = ((Y1 + X1) * (Y2 + X2)) % _q
+    C = (T1 * _2d * T2) % _q
+    D = (2 * Z1 * Z2) % _q
+    E = B - A
+    F = D - C
+    G = D + C
+    H = B + A
+    return ((E * F) % _q, (G * H) % _q, (F * G) % _q, (E * H) % _q)
+
+
 def _edwards_add(P, Q):
-    x1, y1 = P
-    x2, y2 = Q
-    x3 = (x1 * y2 + x2 * y1) * _inv(1 + _d * x1 * x2 * y1 * y2)
-    y3 = (y1 * y2 + x1 * x2) * _inv(1 - _d * x1 * x2 * y1 * y2)
-    return (x3 % _q, y3 % _q)
+    return _affine(_ext_add(_ext(P), _ext(Q)))
 
 
 def _scalarmult(P, e):
-    Q = (0, 1)
+    Q = (0, 1, 1, 0)  # neutral element
+    R = _ext(P)
     while e:
         if e & 1:
-            Q = _edwards_add(Q, P)
-        P = _edwards_add(P, P)
+            Q = _ext_add(Q, R)
+        R = _ext_add(R, R)
         e >>= 1
-    return Q
+    return _affine(Q)
 
 
 def _encodepoint(P):
