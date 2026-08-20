@@ -85,3 +85,16 @@ both public histories consistently, which any clone detects. The witness
 chain obeys the same honesty rules as the attestation chain — append-only,
 gaps visible, failures recorded as what they are (`DIVERGED` is published as
 `DIVERGED`).
+
+## The drill witness
+
+`drill_witness.jsonl` is a THIRD chain, signed by the same witness key
+(`witness_pub.json`). Each line attests, from raw bytes, that the estate's
+acceptance organ actually ran its drills: the drill register advanced and the
+organ's six constructed failures carry a dated all-passed artifact. It attests
+the drill RAN — never that the checks are healthy; a lapse publishes honestly
+as `DRILL-STALE`. Verify:
+
+```
+python3 verify_drill_witness.py
+```
