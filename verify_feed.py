@@ -182,12 +182,12 @@ def ed25519_verify(pub32, msg, sig64):
 # ---- feed rules (must mirror the emitter's published spec) ---------------------------
 GENESIS_PREV = "0" * 64
 FIELD_SHAPES = {
-    "timestamp": re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"),
-    "contract_self_sha256": re.compile(r"^[0-9a-f]{64}$"),
-    "reflects_commit": re.compile(r"^[0-9a-f]{7,12}$"),
-    "gates_summary": re.compile(r"^\d{1,3}/\d{1,3} (PASS|FAIL)$"),
-    "tenant": re.compile(r"^tenant-\d{2}$"),
-    "prev_attestation_sha256": re.compile(r"^[0-9a-f]{64}$"),
+    "timestamp": re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z"),
+    "contract_self_sha256": re.compile(r"\A[0-9a-f]{64}\Z"),
+    "reflects_commit": re.compile(r"\A[0-9a-f]{7,12}\Z"),
+    "gates_summary": re.compile(r"\A\d{1,3}/\d{1,3} (PASS|FAIL)\Z"),
+    "tenant": re.compile(r"\Atenant-\d{2}\Z"),
+    "prev_attestation_sha256": re.compile(r"\A[0-9a-f]{64}\Z"),
 }
 INT_FIELDS = {"consent_receipts_count": (0, 1_000_000)}
 
@@ -208,9 +208,9 @@ INT_FIELDS = {"consent_receipts_count": (0, 1_000_000)}
 # published genesis key is accepted.
 SUCCESSOR_SHAPES = {
     "timestamp": FIELD_SHAPES["timestamp"],
-    "record_type": re.compile(r"^successor_authorisation$"),
-    "successor_pubkey": re.compile(r"^[0-9a-f]{64}$"),
-    "authorised_by_pubkey": re.compile(r"^[0-9a-f]{64}$"),
+    "record_type": re.compile(r"\Asuccessor_authorisation\Z"),
+    "successor_pubkey": re.compile(r"\A[0-9a-f]{64}\Z"),
+    "authorised_by_pubkey": re.compile(r"\A[0-9a-f]{64}\Z"),
     "tenant": FIELD_SHAPES["tenant"],
     "prev_attestation_sha256": FIELD_SHAPES["prev_attestation_sha256"],
 }
@@ -224,12 +224,12 @@ SUCCESSOR_SHAPES = {
 #
 # successor_authorisation remains fully honoured. It names a key with no machine attached,
 # which is the honest record of what it is: a signer whose machine was never published.
-HEX64 = re.compile(r"^[0-9a-f]{64}$")
-MACHINE = re.compile(r"^[a-z][a-z0-9-]{2,31}$")
+HEX64 = re.compile(r"\A[0-9a-f]{64}\Z")
+MACHINE = re.compile(r"\A[a-z][a-z0-9-]{2,31}\Z")
 
 SIGNER_AUTHORISATION_SHAPES = {
     "timestamp": FIELD_SHAPES["timestamp"],
-    "record_type": re.compile(r"^signer_authorisation$"),
+    "record_type": re.compile(r"\Asigner_authorisation\Z"),
     "signer_pubkey": HEX64,
     "machine": MACHINE,
     "authorised_by_pubkey": HEX64,
@@ -238,14 +238,14 @@ SIGNER_AUTHORISATION_SHAPES = {
 }
 SIGNER_REVOCATION_SHAPES = {
     "timestamp": FIELD_SHAPES["timestamp"],
-    "record_type": re.compile(r"^signer_revocation$"),
+    "record_type": re.compile(r"\Asigner_revocation\Z"),
     "revoked_by_pubkey": HEX64,
     "tenant": FIELD_SHAPES["tenant"],
     "prev_attestation_sha256": FIELD_SHAPES["prev_attestation_sha256"],
 }
 PROOF_OF_LIFE_SHAPES = {
     "timestamp": FIELD_SHAPES["timestamp"],
-    "record_type": re.compile(r"^proof_of_life$"),
+    "record_type": re.compile(r"\Aproof_of_life\Z"),
     "machine": MACHINE,
     "signer_pubkey": HEX64,
     "tenant": FIELD_SHAPES["tenant"],
