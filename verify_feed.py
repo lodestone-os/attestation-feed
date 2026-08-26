@@ -255,6 +255,37 @@ PROOF_OF_LIFE_SHAPES = {
 # closed — every element must match its shape, and the list has a bounded length.
 REVOCATION_LISTS = {"revoked_pubkeys": (HEX64, 1, 16)}
 
+# ---- record kinds 6-7: B2.5 WebAuthn credential leaves (row 2461, LV-…-2461 P2-6) -------
+# MIRRORS attest.py exactly (test_credential_leaves asserts the mirror). DISTINCT kinds,
+# DELIBERATELY OUTSIDE SET_MUTATING: these leaves publish and retire the owner's PASSKEY
+# credentials for the approval rail — they never touch the machine signer set, its
+# floor-of-two, or its no-self-revocation rules. The rail explicitly permits retiring to
+# one credential and then zero (both lost → approvals halt fail-closed); running these
+# through the signer machinery would false-red exactly that recovery. Head element is
+# "retire", never "revocation" — signer_revocation owns that word (the neighbour check).
+HEX130 = re.compile(r"\A04[0-9a-f]{128}\Z")            # uncompressed P-256 point
+CREDENTIAL_ID_SHAPE = re.compile(r"\A[A-Za-z0-9_.:-]{1,128}\Z")
+
+CREDENTIAL_REGISTER_SHAPES = {
+    "timestamp": FIELD_SHAPES["timestamp"],
+    "record_type": re.compile(r"\Acredential_register\Z"),
+    "credential_id": CREDENTIAL_ID_SHAPE,
+    "credential_pubkey": HEX130,
+    "machine": MACHINE,
+    "approved_by": re.compile(r"\A(ceremony|[A-Za-z0-9_.:-]{1,128})\Z"),
+    "tenant": FIELD_SHAPES["tenant"],
+    "prev_attestation_sha256": FIELD_SHAPES["prev_attestation_sha256"],
+}
+CREDENTIAL_RETIRE_SHAPES = {
+    "timestamp": FIELD_SHAPES["timestamp"],
+    "record_type": re.compile(r"\Acredential_retire\Z"),
+    "credential_id": CREDENTIAL_ID_SHAPE,
+    "retired_by_credential": CREDENTIAL_ID_SHAPE,
+    "approval_sha256": HEX64,
+    "tenant": FIELD_SHAPES["tenant"],
+    "prev_attestation_sha256": FIELD_SHAPES["prev_attestation_sha256"],
+}
+
 # Field set -> (name, str-shapes, int-ranges, list-shapes). Resolution is by EXACT field
 # set, so a line that is neither kind is never coerced into the nearer one.
 RECORD_KINDS = {
@@ -268,8 +299,14 @@ RECORD_KINDS = {
         ("signer_revocation", SIGNER_REVOCATION_SHAPES, {}, REVOCATION_LISTS),
     frozenset(list(PROOF_OF_LIFE_SHAPES) + ["signature"]):
         ("proof_of_life", PROOF_OF_LIFE_SHAPES, {}, {}),
+    frozenset(list(CREDENTIAL_REGISTER_SHAPES) + ["signature"]):
+        ("credential_register", CREDENTIAL_REGISTER_SHAPES, {}, {}),
+    frozenset(list(CREDENTIAL_RETIRE_SHAPES) + ["signature"]):
+        ("credential_retire", CREDENTIAL_RETIRE_SHAPES, {}, {}),
 }
 # The kinds that mutate the signer set. Every other kind may only be checked against it.
+# credential_register / credential_retire are DELIBERATELY absent: passkey credentials are
+# not signers, and a credential retire must be able to take the credential count to one.
 SET_MUTATING = ("successor_authorisation", "signer_authorisation", "signer_revocation")
 # Default proof-of-life window. A machine that has not signed inside it is a named defect,
 # not a quiet one. Widened here rather than in each caller so there is ONE definition.
