@@ -233,5 +233,32 @@ def main(argv):
     return 0
 
 
+# dr:287 — UNKNOWN ARGV MUST NOT REACH THE DEFAULT PATH. This script's main fell through on an
+# unrecognised flag and its default path WRITES, which is the dr:245 damage class: a usage probe
+# or a typo ran the real thing. -h/--help prints the accepted forms and exits 0 having run
+# nothing; an unknown flag prints them and exits 2 having run nothing; a recognised flag, a
+# --key=value and any positional pass straight through, so no working invocation changes.
+# The lint that holds the class is setup/hooks/cli_argv_safety_lint.py.
+_ARGV_KNOWN = {"--help", "-h"}
+
+
+def _argv_gate(argv=None):
+    import sys as _sys
+    argv = list(_sys.argv[1:] if argv is None else argv)
+    _usage = "usage: verify_drill_witness.py [%s]" % " | ".join(sorted(_ARGV_KNOWN))
+    if "-h" in argv or "--help" in argv:
+        print(_usage)
+        raise SystemExit(0)
+    unknown = [a for a in argv if a.startswith("-") and a not in _ARGV_KNOWN
+               and a.split("=", 1)[0] + "=" not in _ARGV_KNOWN]
+    if unknown:
+        _sys.stderr.write("verify_drill_witness.py: unknown argv %s\n%s\n" % (" ".join(unknown), _usage))
+        raise SystemExit(2)
+
+
+
+
+
 if __name__ == "__main__":
+    _argv_gate()
     sys.exit(main(sys.argv))
