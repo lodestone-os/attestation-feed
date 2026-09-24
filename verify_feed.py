@@ -13,7 +13,12 @@ What it proves, per line:
   2. SIG    — the Ed25519 signature verifies over the canonical form (the JSON object
               minus "signature", keys sorted, separators (",",":"), UTF-8) against the
               published public key.
-  3. SHAPE  — every field matches the fixed allowlist shape (no free text ever).
+  3. SHAPE  — every field matches the fixed allowlist shape (no free text ever), in ASCII
+              digits; the line's bytes are exactly the writer's serialisation of the
+              object (sorted keys, separators (",",":"), ASCII escapes, no duplicate key)
+              and the signature is the canonical base64 of its bytes — so the newest
+              line, which no later prev pins, has one spelling only. The Ed25519 check
+              refuses a key with any torsion component ([l]A must be the identity).
   4. SIGNER — the signing key is IN THE PUBLISHED SIGNER SET at that height. The set is
               not a side file you have to be given: it is derived from this chain alone,
               starting at the published genesis key and growing only through
@@ -150,15 +155,41 @@ def _isoncurve(P):
 
 
 def _decodepoint(s):
+    # CANONICAL decoding only (RFC 8032 section 5.1.3 steps 1 and 4). A y at or above q is a
+    # second spelling of the point y - q, and x = 0 with the sign bit set is a second spelling
+    # of x = 0; accepting either lets one point carry two encodings (malleability).
     n = int.from_bytes(s, "little")
     y = n & ((1 << 255) - 1)
+    if y >= _q:
+        raise ValueError("non-canonical point encoding: y >= q")
     x = _xrecover(y)
+    if x == 0 and (n >> 255) & 1:
+        raise ValueError("non-canonical point encoding: x = 0 with the sign bit set")
     if x & 1 != (n >> 255) & 1:
         x = _q - x
     P = (x, y)
     if not _isoncurve(P):
         raise ValueError("point not on curve")
     return P
+
+
+def _is_small_order(P):
+    """True iff [8]P is the identity — P lies in the cofactor-8 torsion subgroup."""
+    x, y = _scalarmult(P, 8)
+    return x % _q == 0 and y % _q == 1
+
+
+_TORSION_FREE = {}
+
+
+def _is_torsion_free(pub32, A):
+    """True iff [l]A is the identity — A lies in the prime-order subgroup. Cached per encoded
+    key: the walk verifies every line against every accepted signer."""
+    got = _TORSION_FREE.get(pub32)
+    if got is None:
+        x, y = _scalarmult(A, _l)
+        got = _TORSION_FREE[pub32] = (x % _q == 0 and y % _q == 1)
+    return got
 
 
 def ed25519_verify(pub32, msg, sig64):
@@ -169,6 +200,20 @@ def ed25519_verify(pub32, msg, sig64):
         R = _decodepoint(sig64[:32])
         A = _decodepoint(pub32)
     except ValueError:
+        return False
+    # A small-order key verifies S = 0 for EVERY message ([h]A is torsion, so R = -[h]A works),
+    # and a small-order R lets whoever knows the key's scalar sign without a nonce. Neither is
+    # ever produced by an honest signer, so both are refused.
+    if _is_small_order(A) or _is_small_order(R):
+        return False
+    # A key with a torsion COMPONENT is also refused. A' = [a]B + T (T of order n in {2, 4, 8})
+    # is not small order, yet the scalar a signs under it honestly whenever n divides h: then
+    # R + [h]A' = [r]B + [h*a]B + [h]T = [S]B. So a mixed-order key CAN sign honestly — for
+    # about 1/n of messages (the order-2 case verified 10 of 20) — which makes it a key whose
+    # verdict depends on the message hash, and no honest keygen ever emits one. [l]A must be
+    # the identity. With A torsion-free the cofactorless equation forces R into the prime-order
+    # subgroup too, so R needs no second check.
+    if not _is_torsion_free(pub32, A):
         return False
     S = int.from_bytes(sig64[32:], "little")
     if S >= _l:
@@ -181,13 +226,16 @@ def ed25519_verify(pub32, msg, sig64):
 
 # ---- feed rules (must mirror the emitter's published spec) ---------------------------
 GENESIS_PREV = "0" * 64
+# re.ASCII on EVERY shape below: in a str pattern `\d` matches any Unicode decimal digit, so
+# without it a timestamp, gates_summary or tenant spelled in Arabic-Indic digits passed the wall.
+_A = re.ASCII
 FIELD_SHAPES = {
-    "timestamp": re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z"),
-    "contract_self_sha256": re.compile(r"\A[0-9a-f]{64}\Z"),
-    "reflects_commit": re.compile(r"\A[0-9a-f]{7,12}\Z"),
-    "gates_summary": re.compile(r"\A\d{1,3}/\d{1,3} (PASS|FAIL)\Z"),
-    "tenant": re.compile(r"\Atenant-\d{2}\Z"),
-    "prev_attestation_sha256": re.compile(r"\A[0-9a-f]{64}\Z"),
+    "timestamp": re.compile(r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z", _A),
+    "contract_self_sha256": re.compile(r"\A[0-9a-f]{64}\Z", _A),
+    "reflects_commit": re.compile(r"\A[0-9a-f]{7,12}\Z", _A),
+    "gates_summary": re.compile(r"\A\d{1,3}/\d{1,3} (PASS|FAIL)\Z", _A),
+    "tenant": re.compile(r"\Atenant-\d{2}\Z", _A),
+    "prev_attestation_sha256": re.compile(r"\A[0-9a-f]{64}\Z", _A),
 }
 INT_FIELDS = {"consent_receipts_count": (0, 1_000_000)}
 
@@ -208,9 +256,9 @@ INT_FIELDS = {"consent_receipts_count": (0, 1_000_000)}
 # published genesis key is accepted.
 SUCCESSOR_SHAPES = {
     "timestamp": FIELD_SHAPES["timestamp"],
-    "record_type": re.compile(r"\Asuccessor_authorisation\Z"),
-    "successor_pubkey": re.compile(r"\A[0-9a-f]{64}\Z"),
-    "authorised_by_pubkey": re.compile(r"\A[0-9a-f]{64}\Z"),
+    "record_type": re.compile(r"\Asuccessor_authorisation\Z", _A),
+    "successor_pubkey": re.compile(r"\A[0-9a-f]{64}\Z", _A),
+    "authorised_by_pubkey": re.compile(r"\A[0-9a-f]{64}\Z", _A),
     "tenant": FIELD_SHAPES["tenant"],
     "prev_attestation_sha256": FIELD_SHAPES["prev_attestation_sha256"],
 }
@@ -224,12 +272,12 @@ SUCCESSOR_SHAPES = {
 #
 # successor_authorisation remains fully honoured. It names a key with no machine attached,
 # which is the honest record of what it is: a signer whose machine was never published.
-HEX64 = re.compile(r"\A[0-9a-f]{64}\Z")
-MACHINE = re.compile(r"\A[a-z][a-z0-9-]{2,31}\Z")
+HEX64 = re.compile(r"\A[0-9a-f]{64}\Z", _A)
+MACHINE = re.compile(r"\A[a-z][a-z0-9-]{2,31}\Z", _A)
 
 SIGNER_AUTHORISATION_SHAPES = {
     "timestamp": FIELD_SHAPES["timestamp"],
-    "record_type": re.compile(r"\Asigner_authorisation\Z"),
+    "record_type": re.compile(r"\Asigner_authorisation\Z", _A),
     "signer_pubkey": HEX64,
     "machine": MACHINE,
     "authorised_by_pubkey": HEX64,
@@ -238,14 +286,14 @@ SIGNER_AUTHORISATION_SHAPES = {
 }
 SIGNER_REVOCATION_SHAPES = {
     "timestamp": FIELD_SHAPES["timestamp"],
-    "record_type": re.compile(r"\Asigner_revocation\Z"),
+    "record_type": re.compile(r"\Asigner_revocation\Z", _A),
     "revoked_by_pubkey": HEX64,
     "tenant": FIELD_SHAPES["tenant"],
     "prev_attestation_sha256": FIELD_SHAPES["prev_attestation_sha256"],
 }
 PROOF_OF_LIFE_SHAPES = {
     "timestamp": FIELD_SHAPES["timestamp"],
-    "record_type": re.compile(r"\Aproof_of_life\Z"),
+    "record_type": re.compile(r"\Aproof_of_life\Z", _A),
     "machine": MACHINE,
     "signer_pubkey": HEX64,
     "tenant": FIELD_SHAPES["tenant"],
@@ -263,22 +311,22 @@ REVOCATION_LISTS = {"revoked_pubkeys": (HEX64, 1, 16)}
 # one credential and then zero (both lost → approvals halt fail-closed); running these
 # through the signer machinery would false-red exactly that recovery. Head element is
 # "retire", never "revocation" — signer_revocation owns that word (the neighbour check).
-HEX130 = re.compile(r"\A04[0-9a-f]{128}\Z")            # uncompressed P-256 point
-CREDENTIAL_ID_SHAPE = re.compile(r"\A[A-Za-z0-9_.:-]{1,128}\Z")
+HEX130 = re.compile(r"\A04[0-9a-f]{128}\Z", _A)        # uncompressed P-256 point
+CREDENTIAL_ID_SHAPE = re.compile(r"\A[A-Za-z0-9_.:-]{1,128}\Z", _A)
 
 CREDENTIAL_REGISTER_SHAPES = {
     "timestamp": FIELD_SHAPES["timestamp"],
-    "record_type": re.compile(r"\Acredential_register\Z"),
+    "record_type": re.compile(r"\Acredential_register\Z", _A),
     "credential_id": CREDENTIAL_ID_SHAPE,
     "credential_pubkey": HEX130,
     "machine": MACHINE,
-    "approved_by": re.compile(r"\A(ceremony|[A-Za-z0-9_.:-]{1,128})\Z"),
+    "approved_by": re.compile(r"\A(ceremony|[A-Za-z0-9_.:-]{1,128})\Z", _A),
     "tenant": FIELD_SHAPES["tenant"],
     "prev_attestation_sha256": FIELD_SHAPES["prev_attestation_sha256"],
 }
 CREDENTIAL_RETIRE_SHAPES = {
     "timestamp": FIELD_SHAPES["timestamp"],
-    "record_type": re.compile(r"\Acredential_retire\Z"),
+    "record_type": re.compile(r"\Acredential_retire\Z", _A),
     "credential_id": CREDENTIAL_ID_SHAPE,
     "retired_by_credential": CREDENTIAL_ID_SHAPE,
     "approval_sha256": HEX64,
@@ -383,6 +431,49 @@ def canonical(obj):
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+# ---- the LINE's bytes, not only its parsed object ------------------------------------------
+# The signature covers the PARSED object and the chain covers the previous line's BYTES, so the
+# NEWEST line — which no successor's prev pins yet — could be re-spelled and still pass: a
+# duplicate key (json keeps the last; a first-wins reader sees the other), whitespace,
+# \u-escapes, key order, and an alternative base64 spelling of the signature (b64decode ignores
+# the spare padding bits, so one 64-byte signature has sixteen spellings). So every line must be
+# byte-for-byte the WRITER's serialisation of the object it carries — attest.py emits
+# json.dumps(full, sort_keys=True, separators=(",", ":")) with the default ensure_ascii, which is
+# exactly serialise() below — and the signature must be the one canonical base64 of its bytes.
+
+def _refuse_duplicate_keys(pairs):
+    out = {}
+    for k, v in pairs:
+        if k in out:
+            raise ValueError("duplicate key %r" % k)
+        out[k] = v
+    return out
+
+
+def serialise(obj):
+    """The writer's exact line bytes for a feed record (newline excluded)."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def line_form_error(raw, obj):
+    """None iff `raw` is the writer's serialisation of `obj`, with no duplicate key; else why."""
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8")
+    try:
+        parsed = json.loads(raw, object_pairs_hook=_refuse_duplicate_keys)
+    except ValueError as e:
+        if "duplicate key" in str(e):
+            return ("%s — one line, two values: a reader that keeps the first sees a different "
+                    "record from the one whose signature was checked" % e)
+        return "not valid JSON"
+    if parsed != obj:
+        return "the line's bytes do not parse to the object checked — not the object signed"
+    if serialise(parsed) != raw:
+        return ("NON-CANONICAL LINE: the bytes are not the writer's serialisation (sorted keys, "
+                "tight separators, ASCII escapes) — a second spelling of a signed record")
+    return None
+
+
 def detect_fork(objs):
     """None, or a named FORK. Two records that carry the same prev extend the same head.
 
@@ -414,6 +505,9 @@ def check_line(raw, obj, prev_hash, state):
 
     Returns (error_or_None, kind_name, signer_hex_or_None).
     """
+    form = line_form_error(raw, obj)
+    if form:
+        return form, None, None
     kind = RECORD_KINDS.get(frozenset(obj))
     if kind is None:
         return "field set matches no record kind (got %s)" % sorted(obj), None, None
@@ -440,6 +534,10 @@ def check_line(raw, obj, prev_hash, state):
         sig = base64.b64decode(obj["signature"], validate=True)
     except Exception:
         return "signature is not valid base64", name, None
+    if not isinstance(obj["signature"], str) or \
+            base64.b64encode(sig).decode("ascii") != obj["signature"]:
+        return ("signature is not the canonical base64 of its bytes — decode then re-encode must "
+                "give back the same string, or one signature has more than one spelling"), name, None
     msg = canonical(obj)
 
     # ---- the signer-set gate (row 1638): fail-closed, and LOUD about which failure ----

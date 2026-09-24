@@ -23,7 +23,14 @@ What this verifies, per line:
               (the JSON object minus "signature", keys sorted, separators
               (",",":"), UTF-8) against the published witness public key.
   3. SHAPE  — every field matches the fixed allowlist (hashes, generations,
-              booleans, a closed verdict set — no free text ever).
+              booleans, a closed verdict set — no free text ever), in ASCII digits.
+  4. FORM   — the line's bytes are exactly the writer's serialisation of the
+              object (sorted keys, separators (",",":"), ASCII escapes) and carry
+              no duplicate key, so the newest line — which no later "prev" pins —
+              has one spelling only.
+
+The Ed25519 check refuses a key with any torsion component ([l]A must be the
+identity), not only a small-order one.
 
 Exit 0 = full chain PASS. Exit 1 = the first broken line, named. This file
 embeds a pure-Python Ed25519 verifier (RFC 8032) so you don't have to trust
@@ -94,15 +101,41 @@ def _isoncurve(P):
 
 
 def _decodepoint(s):
+    # CANONICAL decoding only (RFC 8032 section 5.1.3 steps 1 and 4). A y at or above q is a
+    # second spelling of the point y - q, and x = 0 with the sign bit set is a second spelling
+    # of x = 0; accepting either lets one point carry two encodings (malleability).
     n = int.from_bytes(s, "little")
     y = n & ((1 << 255) - 1)
+    if y >= _q:
+        raise ValueError("non-canonical point encoding: y >= q")
     x = _xrecover(y)
+    if x == 0 and (n >> 255) & 1:
+        raise ValueError("non-canonical point encoding: x = 0 with the sign bit set")
     if x & 1 != (n >> 255) & 1:
         x = _q - x
     P = (x, y)
     if not _isoncurve(P):
         raise ValueError("point not on curve")
     return P
+
+
+def _is_small_order(P):
+    """True iff [8]P is the identity — P lies in the cofactor-8 torsion subgroup."""
+    x, y = _scalarmult(P, 8)
+    return x % _q == 0 and y % _q == 1
+
+
+_TORSION_FREE = {}
+
+
+def _is_torsion_free(pub32, A):
+    """True iff [l]A is the identity — A lies in the prime-order subgroup. Cached per encoded
+    key: a chain carries one key on every line and [l]A is a full 253-bit multiplication."""
+    got = _TORSION_FREE.get(pub32)
+    if got is None:
+        x, y = _scalarmult(A, _l)
+        got = _TORSION_FREE[pub32] = (x % _q == 0 and y % _q == 1)
+    return got
 
 
 def ed25519_verify(pub32, msg, sig64):
@@ -113,6 +146,20 @@ def ed25519_verify(pub32, msg, sig64):
         R = _decodepoint(sig64[:32])
         A = _decodepoint(pub32)
     except ValueError:
+        return False
+    # A small-order key verifies S = 0 for EVERY message ([h]A is torsion, so R = -[h]A works),
+    # and a small-order R lets whoever knows the key's scalar sign without a nonce. Neither is
+    # ever produced by an honest signer, so both are refused.
+    if _is_small_order(A) or _is_small_order(R):
+        return False
+    # A key with a torsion COMPONENT is also refused. A' = [a]B + T (T of order n in {2, 4, 8})
+    # is not small order, yet the scalar a signs under it honestly whenever n divides h: then
+    # R + [h]A' = [r]B + [h*a]B + [h]T = [S]B. So a mixed-order key CAN sign honestly — for
+    # about 1/n of messages (the order-2 case verified 10 of 20) — which makes it a key whose
+    # verdict depends on the message hash, and no honest keygen ever emits one. [l]A must be
+    # the identity. With A torsion-free the cofactorless equation forces R into the prime-order
+    # subgroup too, so R needs no second check.
+    if not _is_torsion_free(pub32, A):
         return False
     S = int.from_bytes(sig64[32:], "little")
     if S >= _l:
@@ -125,14 +172,17 @@ def ed25519_verify(pub32, msg, sig64):
 
 # ---- witness rules (must mirror the observer's published spec) -----------------------
 GENESIS_PREV = "genesis"
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+# re.ASCII on EVERY shape: in a str pattern `\d` matches any Unicode decimal digit, so without it
+# a ts spelled in Arabic-Indic digits ("٢٠٢٦-...") passed the wall.
+_A = re.ASCII
+_HEX64 = re.compile(r"^[0-9a-f]{64}$", _A)
 STR_SHAPES = {
-    "ts": re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$"),
-    "observer": re.compile(r"^witness$"),
-    "verdict": re.compile(r"^(MATCH|GENERATION-SKEW|DIVERGED|PARTIAL|UNOBSERVABLE)$"),
+    "ts": re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00$", _A),
+    "observer": re.compile(r"^witness$", _A),
+    "verdict": re.compile(r"^(MATCH|GENERATION-SKEW|DIVERGED|PARTIAL|UNOBSERVABLE)$", _A),
     "pub": _HEX64,
-    "signature": re.compile(r"^[0-9a-f]{128}$"),
-    "prev": re.compile(r"^(genesis|[0-9a-f]{64})$"),
+    "signature": re.compile(r"^[0-9a-f]{128}$", _A),
+    "prev": re.compile(r"^(genesis|[0-9a-f]{64})$", _A),
 }
 # hash/claim fields: 64-hex, empty string (an absent stored claim), or null (unobservable)
 NULLABLE_HASH = {"git_hash", "slate_hash"}
@@ -148,20 +198,66 @@ def canonical(obj):
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+# ---- the LINE's bytes, not only its parsed object ------------------------------------------
+# The signature covers the PARSED object and the chain covers the previous line's BYTES, so the
+# NEWEST line — which no successor's prev pins yet — could be re-spelled and still pass: a
+# duplicate key (json keeps the last; a first-wins reader sees the other), whitespace,
+# \u-escapes, key order. So every line must be byte-for-byte the WRITER's serialisation of the
+# object it carries: witness.py / drill_witness.py write json.dumps(obs, sort_keys=True,
+# separators=(",", ":")) with the default ensure_ascii, which is exactly serialise() below.
+
+def _refuse_duplicate_keys(pairs):
+    out = {}
+    for k, v in pairs:
+        if k in out:
+            raise ValueError("duplicate key %r" % k)
+        out[k] = v
+    return out
+
+
+def serialise(obj):
+    """The writer's exact line bytes for an observation object (newline excluded)."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def line_form_error(raw, obj):
+    """None iff `raw` is the writer's serialisation of `obj`, with no duplicate key; else why."""
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8")
+    try:
+        parsed = json.loads(raw, object_pairs_hook=_refuse_duplicate_keys)
+    except ValueError as e:
+        if "duplicate key" in str(e):
+            return ("%s — one line, two values: a reader that keeps the first sees a different "
+                    "observation from the one whose signature was checked" % e)
+        return "not valid JSON"
+    if parsed != obj:
+        return "the line's bytes do not parse to the object checked — not the object signed"
+    if serialise(parsed) != raw:
+        return ("NON-CANONICAL LINE: the bytes are not the writer's serialisation (sorted keys, "
+                "tight separators, ASCII escapes) — a second spelling of a signed observation")
+    return None
+
+
 def check_line(raw, obj, prev_hash, pub):
+    form = line_form_error(raw, obj)
+    if form:
+        return form
     unknown = set(obj) - KNOWN
     if unknown:
         return "unknown field(s) %s — the allowlist is closed" % sorted(unknown)
     missing = REQUIRED - set(obj)
     if missing:
         return "missing required field(s) %s" % sorted(missing)
+    # fullmatch, never match: under re.match a trailing `$` also matches just before a final
+    # "\n", so "MATCH\n" would pass the closed verdict set.
     for k, rx in STR_SHAPES.items():
-        if not isinstance(obj[k], str) or not rx.match(obj[k]):
+        if not isinstance(obj[k], str) or not rx.fullmatch(obj[k]):
             return "field %r fails its shape" % k
     for k in NULLABLE_HASH | CLAIM_FIELDS:
         if k in obj:
             v = obj[k]
-            if v is not None and not (isinstance(v, str) and (v == "" or _HEX64.match(v))):
+            if v is not None and not (isinstance(v, str) and (v == "" or _HEX64.fullmatch(v))):
                 return "field %r must be 64-hex, empty, or null" % k
     for k in NULLABLE_INT:
         if k in obj:
